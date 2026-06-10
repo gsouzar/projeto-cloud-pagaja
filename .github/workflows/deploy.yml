@@ -1,0 +1,62 @@
+name: Pipeline CI/CD Multi-Ambiente PagaJá
+
+on:
+  push:
+    branches:
+      - main       
+      - staging    
+
+jobs:
+  deploy:
+    name: Build e Deploy Automatizado
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: 1. Checkout do Código Fonte
+      uses: actions/checkout@v3
+
+    - name: 2. Selecionar Ambiente Dinamicamente
+      id: env-setup
+      run: |
+        if [ "${{ github.ref_name }}" = "main" ]; then
+          echo "EC2_HOST=${{ secrets.EC2_HOST_PRODUCAO }}" >> $GITHUB_ENV
+          echo "AMBIENTE=producao" >> $GITHUB_ENV
+          echo "NOME_CONTAINER=pagaja-container-producao" >> $GITHUB_ENV
+        else
+          echo "EC2_HOST=${{ secrets.EC2_HOST_HOMOLOGACAO }}" >> $GITHUB_ENV
+          echo "AMBIENTE=homologacao" >> $GITHUB_ENV
+          echo "NOME_CONTAINER=pagaja-container-homologacao" >> $GITHUB_ENV
+        fi
+
+    - name: 3. Validar e injetar Chave SSH Privada
+      run: |
+        mkdir -p ~/.ssh
+        echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
+        chmod 600 ~/.ssh/id_rsa
+        ssh-keyscan -H ${{ env.EC2_HOST }} >> ~/.ssh/known_hosts
+
+    - name: 4. Copiar Artefatos para a Instância AWS Alvo
+      run: |
+        scp -r Dockerfile index.html ubuntu@${{ env.EC2_HOST }}:~/
+
+    - name: 5. Reconstruir Infraestrutura Docker via SSH na AWS
+      run: |
+        ssh ubuntu@${{ env.EC2_HOST }} "
+          echo '=== Limpando containers antigos do ambiente de ${{ env.AMBIENTE }} ==='
+          docker stop ${{ env.NOME_CONTAINER }} || true
+          docker rm ${{ env.NOME_CONTAINER }} || true
+          
+          echo '=== Iniciando construção da imagem Docker local ==='
+          docker build -t pagaja-app:${{ env.AMBIENTE }} .
+          
+          echo '=== Subindo o container e abrindo as portas 80 e 20 ==='
+          docker run -d \
+            --name ${{ env.NOME_CONTAINER }} \
+            -p 80:80 \
+            -p 20:20 \
+            --restart always \
+            pagaja-app:${{ env.AMBIENTE }}
+            
+          echo '=== Deploy Concluído com Sucesso! ==='
+          docker ps
+        "
